@@ -124,6 +124,8 @@ public interface IHeartbeatService
 
 ## Usage Example
 
+### Insert a File
+
 ```csharp
 using Corp.Api.DocMan.Lib.Services.Interfaces;
 
@@ -151,6 +153,64 @@ public class MyService(IFileService fileService)
             // handle error - response.StatusCode, response.Error
         }
     }
+}
+```
+
+### Batch Insert Files
+
+```csharp
+public async Task UploadMultipleFilesAsync(IFileService fileService)
+{
+    var files = new List<Corp.Api.DocMan.Obj.Entities.File>
+    {
+        new() { FhClaimNumber = "FH1234567890123", Name = "doc1.pdf", FileType = "pdf", ModifiedBy = "jdoe" },
+        new() { FhClaimNumber = "FH1234567890123", Name = "doc2.pdf", FileType = "pdf", ModifiedBy = "jdoe" }
+    };
+
+    var response = await fileService.InsertBatchAsync(files);
+
+    if (response.IsSuccessStatusCode)
+    {
+        var rowsInserted = response.Content;
+    }
+}
+```
+
+### Manage Folders
+
+```csharp
+public async Task CreateAndListFoldersAsync(IFolderService folderService)
+{
+    // Create a folder
+    var folder = new Folder { Name = "Invoices", ModifiedBy = "jdoe" };
+    await folderService.InsertAsync(folder);
+
+    // List all non-deleted folders
+    var response = await folderService.GetAllAsync();
+
+    if (response.IsSuccessStatusCode)
+    {
+        var folders = response.Content;
+    }
+}
+```
+
+### Record an Audit Entry
+
+```csharp
+public async Task RecordViewAsync(IFileViewAuditService auditService, Guid fileId)
+{
+    await auditService.InsertAsync(fileId, "jdoe");
+}
+```
+
+### Health Check
+
+```csharp
+public async Task<bool> IsApiHealthyAsync(IHeartbeatService heartbeatService)
+{
+    var response = await heartbeatService.GetHeartbeatAsync();
+    return response.IsSuccessStatusCode;
 }
 ```
 
@@ -191,3 +251,47 @@ All service methods return Refit `IApiResponse<T>`. Key members:
 | ModifiedBy | string | User who last modified (required, max 100 chars) |
 | ValidFrom | DateTime | Row validity start (system-managed) |
 | ValidTo | DateTime | Row validity end (system-managed) |
+
+### FileViewAudit
+
+| Property | Type | Description |
+|---|---|---|
+| FileId | Guid? | Identifier of the file that was viewed (optional) |
+| ViewedBy | string | User who viewed the file (required, max 100 chars) |
+
+### OriginalFileDeleteAudit
+
+| Property | Type | Description |
+|---|---|---|
+| FileName | string | Name of the file that was deleted (required, max 100 chars) |
+| DeletedBy | string | User who deleted the file (required, max 100 chars) |
+
+## Important Notes
+
+### File Type Alias
+
+The entity class `Corp.Api.DocMan.Obj.Entities.File` conflicts with `System.IO.File`. When referencing the entity directly, use the fully qualified name or add a using alias:
+
+```csharp
+using File = Corp.Api.DocMan.Obj.Entities.File;
+```
+
+### Soft Deletes
+
+The `DeleteAsync` methods on `IFileService` and `IFolderService` perform soft deletes — they set the `Deleted` flag to `true` rather than removing the row. Use `GetAllAsync(includeDeleted: true)` to retrieve soft-deleted records.
+
+## Solution Architecture
+
+| Project | Description |
+|---|---|
+| **Corp.Api.DocMan** | ASP.NET Core Web API (controllers, Program.cs) |
+| **Corp.Api.DocMan.Data** | Dapper repositories and database access |
+| **Corp.Api.DocMan.Obj** | Shared entity classes (bundled into the NuGet package) |
+| **Corp.Api.DocMan.Lib** | This library — Refit service clients (published as NuGet) |
+
+## Source Repository
+
+- **Azure DevOps**: https://dev.azure.com/IT-Specialty/Projects/_git/Corp.Solution.Api.DocMan
+- **Branch**: `Version-10`
+- **Author**: Mathew Hamilton
+- **Company**: Sedgwick Consumer Claims
