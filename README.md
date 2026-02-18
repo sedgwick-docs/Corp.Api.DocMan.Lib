@@ -26,10 +26,10 @@ Before you can use this library, ensure the following are in place:
 Install from your internal NuGet feed:
 
 ```shell
-dotnet add package Corp.Api.DocMan.Lib --version 10.0.0-beta1
+dotnet add package Corp.Api.DocMan.Lib --version 10.0.0-beta9
 ```
 
-> **Note**: This is a pre-release package (`-beta1`). You may need to pass `--prerelease` or check "Include prerelease" in the Visual Studio NuGet Package Manager to see it.
+> **Note**: This is a pre-release package (`-beta9`). You may need to pass `--prerelease` or check "Include prerelease" in the Visual Studio NuGet Package Manager to see it.
 
 ## Configuration
 
@@ -140,10 +140,12 @@ public interface IFileService
 {
     Task<IApiResponse<List<File>>> GetAllAsync(bool includeDeleted = false, Guid? folderId = null);
     Task<IApiResponse<File>> GetByIdAsync(Guid id);
+    Task<IApiResponse<List<File>>> GetByFolderIdAsync(Guid folderId);
     Task<IApiResponse<Guid>> InsertAsync(File file);
     Task<IApiResponse<int>> InsertBatchAsync(List<File> files);
     Task<IApiResponse<int>> UpdateAsync(File file);
     Task<IApiResponse<int>> DeleteAsync(Guid id, string modifiedBy);
+    Task<IApiResponse<int>> DeletePhysicalAsync(Guid id, string deletedBy);
 }
 ```
 
@@ -151,10 +153,12 @@ public interface IFileService
 |---|---|
 | `GetAllAsync` | Retrieves all files. Pass `includeDeleted: true` to include soft-deleted records. Optionally filter by `folderId` to list files within a specific folder. |
 | `GetByIdAsync` | Retrieves a single file by its unique identifier. Returns the file or a non-success status if not found. |
+| `GetByFolderIdAsync` | Retrieves all non-deleted files within a specific folder. Returns a list of files whose `FolderId` matches the provided identifier. |
 | `InsertAsync` | Creates a new file record. The `Id` may be left as `Guid.Empty` — the API will generate one. Returns the `Guid` of the newly created file. |
 | `InsertBatchAsync` | Creates multiple file records in a single API call. This is significantly more efficient than calling `InsertAsync` in a loop because the API inserts all records in one database round-trip using a table-valued parameter. Returns the number of rows inserted. |
 | `UpdateAsync` | Updates all mutable fields of an existing file (name, type, folder, deleted status). The `Id` field identifies which record to update. |
 | `DeleteAsync` | Soft-deletes a file by setting its `Deleted` flag to `true`. The record remains in the database and can be retrieved with `GetAllAsync(includeDeleted: true)`. The `modifiedBy` parameter records who performed the deletion. |
+| `DeletePhysicalAsync` | Permanently removes a file record from the database. This is irreversible — the row is physically deleted, not soft-deleted. The `deletedBy` parameter records who performed the deletion. |
 
 ### IFolderService
 
@@ -165,9 +169,12 @@ public interface IFolderService
 {
     Task<IApiResponse<List<Folder>>> GetAllAsync(bool includeDeleted = false);
     Task<IApiResponse<Folder>> GetByIdAsync(Guid id);
-    Task<IApiResponse<int>> InsertAsync(Folder folder);
+    Task<IApiResponse<Folder>> GetByFhClaimNumberAsync(string fhClaimNumber);
+    Task<IApiResponse<List<Folder>>> GetByParentFolderIdAsync(Guid parentFolderId);
+    Task<IApiResponse<Guid>> InsertAsync(Folder folder);
     Task<IApiResponse<int>> UpdateAsync(Folder folder);
     Task<IApiResponse<int>> DeleteAsync(Guid id, string modifiedBy);
+    Task<IApiResponse<int>> DeletePhysicalAsync(Guid id, string deletedBy);
 }
 ```
 
@@ -175,9 +182,12 @@ public interface IFolderService
 |---|---|
 | `GetAllAsync` | Retrieves all folders. Pass `includeDeleted: true` to include soft-deleted folders. |
 | `GetByIdAsync` | Retrieves a single folder by its unique identifier. |
-| `InsertAsync` | Creates a new folder. Set `ParentFolderId` to nest it under an existing folder, or leave it `null` for a root-level folder. |
+| `GetByFhClaimNumberAsync` | Retrieves a folder by its FH claim number. The folder's `Name` is matched against the provided claim number. |
+| `GetByParentFolderIdAsync` | Retrieves all non-deleted child folders under a specific parent folder. Returns a list of folders whose `ParentFolderId` matches the provided identifier. |
+| `InsertAsync` | Creates a new folder. Set `ParentFolderId` to nest it under an existing folder, or leave it `null` for a root-level folder. Returns the `Guid` of the newly created folder. |
 | `UpdateAsync` | Updates a folder's name, parent, or deleted status. |
 | `DeleteAsync` | Soft-deletes a folder. Note: this does **not** cascade to files within the folder — those must be deleted separately if desired. |
+| `DeletePhysicalAsync` | Permanently removes a folder record from the database. This is irreversible — the row is physically deleted, not soft-deleted. The `deletedBy` parameter records who performed the deletion. |
 
 ### IFileViewAuditService
 
@@ -197,19 +207,26 @@ public interface IFileViewAuditService
 
 ### IOriginalFileDeleteAuditService
 
-Records an audit trail entry when an original file is permanently deleted from external storage. Like `IFileViewAuditService`, this service is insert-only to preserve audit integrity.
+Records an audit trail entry when an original file is permanently deleted from external storage. Like `IFileViewAuditService`, this service is insert-only to preserve audit integrity. A `DeletePhysicalAsync` method is available for administrative cleanup when necessary.
 
 ```csharp
 public interface IOriginalFileDeleteAuditService
 {
-    Task<IApiResponse<int>> InsertAsync(string fileName, string deletedBy);
+    Task<IApiResponse<int>> InsertAsync(string fhClaimNumber, string fileName, string deletedBy);
+    Task<IApiResponse<int>> DeletePhysicalAsync(int id, string deletedBy);
 }
 ```
 
 | Parameter | Description |
 |---|---|
+| `fhClaimNumber` | The claim number associated with the deleted file (max 15 characters). |
 | `fileName` | The name of the file that was deleted (max 100 characters). |
 | `deletedBy` | The username or identifier of the person who deleted the file (max 100 characters). |
+
+| Method | Description |
+|---|---|
+| `InsertAsync` | Records an audit entry for a permanent file deletion from external storage. |
+| `DeletePhysicalAsync` | Permanently removes an audit record by its integer identifier. Intended for administrative cleanup only. |
 
 ### IHeartbeatService
 
@@ -306,16 +323,19 @@ public async Task CreateAndListFoldersAsync(IFolderService folderService)
 {
     // Create a root-level folder.
     var invoicesFolder = new Folder { Name = "Invoices", ModifiedBy = "jdoe" };
-    await folderService.InsertAsync(invoicesFolder);
+    var insertResponse = await folderService.InsertAsync(invoicesFolder);
 
-    // Create a subfolder under "Invoices" (you would need the parent's Id).
-    var archiveFolder = new Folder
+    if (insertResponse.IsSuccessStatusCode)
     {
-        Name = "Archive",
-        ParentFolderId = invoicesFolder.Id, // Set to the parent folder's Guid
-        ModifiedBy = "jdoe"
-    };
-    await folderService.InsertAsync(archiveFolder);
+        // Create a subfolder under "Invoices" using the returned Guid.
+        var archiveFolder = new Folder
+        {
+            Name = "Archive",
+            ParentFolderId = insertResponse.Content, // Guid of the parent folder
+            ModifiedBy = "jdoe"
+        };
+        await folderService.InsertAsync(archiveFolder);
+    }
 
     // List all non-deleted folders.
     var response = await folderService.GetAllAsync();
@@ -348,12 +368,13 @@ public async Task RecordFileViewAsync(IFileViewAuditService auditService, Guid f
 
 public async Task RecordFileDeletionAsync(
     IOriginalFileDeleteAuditService auditService,
+    string fhClaimNumber,
     string fileName)
 {
     // Record that "jdoe" permanently deleted the original file from storage.
     // This is separate from the soft-delete in IFileService — this audit
     // tracks when the actual binary file was removed.
-    await auditService.InsertAsync(fileName, "jdoe");
+    await auditService.InsertAsync(fhClaimNumber, fileName, "jdoe");
 }
 ```
 
@@ -470,6 +491,7 @@ An immutable audit record created when an original file is permanently deleted f
 
 | Property | Type | Constraints | Description |
 |---|---|---|---|
+| FhClaimNumber | string | Required, max 15 chars | The claim number associated with the deleted file. |
 | FileName | string | Required, max 100 chars | The name of the file that was permanently deleted. |
 | DeletedBy | string | Required, max 100 chars | The username of the person who deleted the file. |
 
@@ -506,9 +528,9 @@ The `DeleteAsync` methods on `IFileService` and `IFolderService` perform **soft 
 - **Include deleted**: Pass `includeDeleted: true` to retrieve all records regardless of deletion status.
 - **Restore a record**: To "undelete" a file or folder, call `UpdateAsync` with `Deleted = false`.
 
-### Audit Services Are Insert-Only
+### Audit Services
 
-The `IFileViewAuditService` and `IOriginalFileDeleteAuditService` intentionally provide only an `InsertAsync` method. There are no update, delete, or retrieve operations. This is a deliberate design choice to ensure audit records are immutable — once created, they cannot be tampered with from the application layer.
+The `IFileViewAuditService` and `IOriginalFileDeleteAuditService` are primarily insert-only services. `IFileViewAuditService` provides only `InsertAsync` — there are no update, delete, or retrieve operations, ensuring view audit records are immutable. `IOriginalFileDeleteAuditService` provides `InsertAsync` for recording deletions and a `DeletePhysicalAsync` method for administrative cleanup of audit records when necessary.
 
 ## Troubleshooting
 
@@ -553,7 +575,7 @@ The `Corp.Api.DocMan.Lib.csproj` has `GeneratePackageOnBuild=True`, so building 
 
 ### API Versioning
 
-The API uses `Asp.Versioning.Mvc` with the default version set to `1.0`. All Refit routes in this library are hardcoded to `/api/v1/...`. If a `v2` is introduced in the future, a corresponding update to this library will be required.
+The API uses `Asp.Versioning.Mvc` with the default version set to `1.0`. The Refit route attributes in this library use relative paths (e.g., `/Folder/GetAll`). The `/api/v1` prefix is part of the base URL configured at client registration time. If a `v2` is introduced in the future, a corresponding update to this library will be required.
 
 ## Source Repository
 
@@ -563,4 +585,4 @@ The API uses `Asp.Versioning.Mvc` with the default version set to `1.0`. All Ref
 | **Branch** | `Version-10` |
 | **Author** | Mathew Hamilton |
 | **Company** | Sedgwick Consumer Claims |
-| **Package Version** | `10.0.0-beta1` |
+| **Package Version** | `10.0.0-beta9` |
