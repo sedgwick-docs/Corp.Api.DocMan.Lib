@@ -279,8 +279,8 @@ public class DocumentService(IFileService fileService)
         {
             // FhClaimNumber is required and ties this file to a claim.
             FhClaimNumber = "FH1234567890123",
-            Name = "report.pdf",
-            FileType = "pdf",
+            Name = "report",
+            FileType = ".pdf",
             // ModifiedBy should be the authenticated user performing the action.
             ModifiedBy = "jdoe"
             // Id can be omitted — the API generates a new Guid.
@@ -312,9 +312,9 @@ public async Task<int> UploadMultipleFilesAsync(IFileService fileService)
 {
     var files = new List<Corp.Api.DocMan.Obj.Entities.File>
     {
-        new() { FhClaimNumber = "FH1234567890123", Name = "doc1.pdf", FileType = "pdf", ModifiedBy = "jdoe" },
-        new() { FhClaimNumber = "FH1234567890123", Name = "doc2.pdf", FileType = "pdf", ModifiedBy = "jdoe" },
-        new() { FhClaimNumber = "FH1234567890123", Name = "doc3.pdf", FileType = "pdf", ModifiedBy = "jdoe" }
+        new() { FhClaimNumber = "FH1234567890123", Name = "doc1", FileType = ".pdf", ModifiedBy = "jdoe" },
+        new() { FhClaimNumber = "FH1234567890123", Name = "doc2", FileType = ".pdf", ModifiedBy = "jdoe" },
+        new() { FhClaimNumber = "FH1234567890123", Name = "doc3", FileType = ".pdf", ModifiedBy = "jdoe" }
     };
 
     var response = await fileService.InsertBatchAsync(files);
