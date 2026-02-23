@@ -26,10 +26,8 @@ Before you can use this library, ensure the following are in place:
 Install from your internal NuGet feed:
 
 ```shell
-dotnet add package Corp.Api.DocMan.Lib --version 10.0.0-beta9
+dotnet add package Corp.Api.DocMan.Lib --version 10.1.1
 ```
-
-> **Note**: This is a pre-release package (`-beta9`). You may need to pass `--prerelease` or check "Include prerelease" in the Visual Studio NuGet Package Manager to see it.
 
 ## Configuration
 
@@ -37,13 +35,12 @@ The library uses a two-layer configuration approach. First, it reads identifiers
 
 ### Step 1: appsettings.json
 
-Add the following three keys to your application's `appsettings.json`. These tell the library which Voyager instance, environment, and application name to use when composing the environment-variable key names:
+Add the following two keys to your application's `appsettings.json`. These tell the library which Voyager instance and environment to use when composing the environment-variable key names:
 
 ```json
 {
   "TargetedVoyagerInstance": "<instance>",
-  "TargetedVoyagerEnvironment": "<environment>",
-  "ApplicationName": "<applicationName>"
+  "TargetedVoyagerEnvironment": "<environment>"
 }
 ```
 
@@ -51,19 +48,18 @@ Add the following three keys to your application's `appsettings.json`. These tel
 |---|---|---|
 | `TargetedVoyagerInstance` | `Voyager1` | Identifies the Voyager platform instance |
 | `TargetedVoyagerEnvironment` | `Production` | Identifies the target environment (Dev, QA, Production, etc.) |
-| `ApplicationName` | `DocMan` | The logical application name used in key composition |
 
 > **Important**: These values are read directly from the `appsettings.json` file on disk (not from `IConfiguration`). Make sure they are present in the physical file, not only in environment overrides.
 
 ### Step 2: Environment Variables
 
-Using the three values from Step 1, the library composes configuration keys in the format `{instance}.{environment}.{applicationName}.{setting}` and resolves them from `IConfiguration`. In practice, these are typically set as environment variables on the host machine or in your CI/CD pipeline.
+Using the two values from Step 1, the library composes configuration keys in the format `{instance}.{environment}.Corp.Api.DocMan.{setting}` and resolves them from `IConfiguration`. In practice, these are typically set as environment variables on the host machine or in your CI/CD pipeline.
 
 | Key | Description |
 |---|---|
-| `{instance}.{environment}.{applicationName}.Url` | Base URL of the DocMan API (e.g., `https://docman-api.internal.corp.com`) |
-| `{instance}.{environment}.{applicationName}.CertificatePath` | Absolute path to the client certificate `.pfx` file |
-| `{instance}.{environment}.{applicationName}.Password` | Certificate password, **AES-encrypted** using `Corp.Lib.Cryptography.Aes.Encrypt()` |
+| `{instance}.{environment}.Corp.Api.DocMan.Url` | Base URL of the DocMan API (e.g., `https://docman-api.internal.corp.com`) |
+| `{instance}.{environment}.Corp.Api.DocMan.CertificatePath` | Absolute path to the client certificate `.pfx` file |
+| `{instance}.{environment}.Corp.Api.DocMan.Password` | Certificate password, **AES-encrypted** using `Corp.Lib.Cryptography.Aes.Encrypt()` |
 
 #### Concrete Example
 
@@ -72,24 +68,25 @@ If your `appsettings.json` contains:
 ```json
 {
   "TargetedVoyagerInstance": "Voyager1",
-  "TargetedVoyagerEnvironment": "Production",
-  "ApplicationName": "DocMan"
+  "TargetedVoyagerEnvironment": "Production"
 }
 ```
 
 Then the library will look for these three environment variables:
 
 ```
-Voyager1.Production.DocMan.Url=https://docman-api.internal.corp.com
-Voyager1.Production.DocMan.CertificatePath=C:\certs\docman-client.pfx
-Voyager1.Production.DocMan.Password=<AES-encrypted-password>
+Voyager1.Production.Corp.Api.DocMan.Url=https://docman-api.internal.corp.com
+Voyager1.Production.Corp.Api.DocMan.CertificatePath=C:\certs\docman-client.pfx
+Voyager1.Production.Corp.Api.DocMan.Password=<AES-encrypted-password>
 ```
 
 If any of these three values are missing or empty, the library throws a `ConfigurationErrorsException` at startup with a descriptive error message identifying exactly which key is missing.
 
 ## Registration
 
-Registration is a single method call. In your application's `Program.cs`, call the `AddDocManApi` extension method on `WebApplicationBuilder`:
+Registration is a single method call. In your application's `Program.cs`, call the `AddDocManApi` extension method on `WebApplicationBuilder` or `HostApplicationBuilder`:
+
+### Web Applications
 
 ```csharp
 using Corp.Api.DocMan.Lib.Extensions;
@@ -105,9 +102,23 @@ var app = builder.Build();
 app.Run();
 ```
 
+### Console Applications and Worker Services
+
+```csharp
+using Corp.Api.DocMan.Lib.Extensions;
+
+var builder = Host.CreateApplicationBuilder(args);
+
+// Same registration method works for HostApplicationBuilder.
+builder.AddDocManApi();
+
+var host = builder.Build();
+host.Run();
+```
+
 ### What `AddDocManApi` Does Behind the Scenes
 
-1. **Reads** `TargetedVoyagerInstance`, `TargetedVoyagerEnvironment`, and `ApplicationName` from your `appsettings.json`.
+1. **Reads** `TargetedVoyagerInstance` and `TargetedVoyagerEnvironment` from your `appsettings.json`.
 2. **Validates** that the three required environment-variable keys (`.Url`, `.CertificatePath`, `.Password`) are present and non-empty. If any are missing, it throws `ConfigurationErrorsException` with a clear message — this is intentionally a fail-fast design so you catch misconfiguration during startup, not at runtime.
 3. **Decrypts** the certificate password using `Corp.Lib.Cryptography.Aes.Decrypt()`.
 4. **Registers** five Refit HTTP clients into the DI container, each configured with the base URL and mutual-TLS certificate:
@@ -141,6 +152,8 @@ public interface IFileService
     Task<IApiResponse<List<File>>> GetAllAsync(bool includeDeleted = false, Guid? folderId = null);
     Task<IApiResponse<File>> GetByIdAsync(Guid id);
     Task<IApiResponse<List<File>>> GetByFolderIdAsync(Guid folderId);
+    Task<IApiResponse<File>> GetByNameAndFhClaimNumberAsync(string name, string fhClaimNumber);
+    Task<IApiResponse<string>> GetVirtualPathAsync(Guid fileId);
     Task<IApiResponse<Guid>> InsertAsync(File file);
     Task<IApiResponse<int>> InsertBatchAsync(List<File> files);
     Task<IApiResponse<int>> UpdateAsync(File file);
@@ -154,6 +167,8 @@ public interface IFileService
 | `GetAllAsync` | Retrieves all files. Pass `includeDeleted: true` to include soft-deleted records. Optionally filter by `folderId` to list files within a specific folder. |
 | `GetByIdAsync` | Retrieves a single file by its unique identifier. Returns the file or a non-success status if not found. |
 | `GetByFolderIdAsync` | Retrieves all non-deleted files within a specific folder. Returns a list of files whose `FolderId` matches the provided identifier. |
+| `GetByNameAndFhClaimNumberAsync` | Retrieves a single non-deleted file by its `Name` and `FhClaimNumber` combination. Useful for checking whether a specific file already exists for a given claim. |
+| `GetVirtualPathAsync` | Returns the full virtual path of a file including its folder hierarchy and filename with extension (e.g., `ClaimFolder/Subfolder/report.pdf`). The path is built by walking the folder tree from the file's folder up to the root. Returns `null` if the file does not exist or is soft-deleted. |
 | `InsertAsync` | Creates a new file record. The `Id` may be left as `Guid.Empty` — the API will generate one. Returns the `Guid` of the newly created file. |
 | `InsertBatchAsync` | Creates multiple file records in a single API call. This is significantly more efficient than calling `InsertAsync` in a loop because the API inserts all records in one database round-trip using a table-valued parameter. Returns the number of rows inserted. |
 | `UpdateAsync` | Updates all mutable fields of an existing file (name, type, folder, deleted status). The `Id` field identifies which record to update. |
@@ -457,6 +472,7 @@ Represents a file metadata record in the document store. Each file is associated
 | Name | string | Required, max 100 chars | The display name of the file (e.g., `"report.pdf"`). |
 | FileType | string | Required, max 10 chars | The file extension without the dot (e.g., `"pdf"`, `"docx"`). |
 | FolderId | Guid? | FK to Folders, nullable | The folder this file is stored in. `null` means it's at the root level. |
+| KeyVersion | int | Required | The encryption key version used to encrypt the file's binary content. |
 | Deleted | bool | Default: false | Soft-delete flag. Set to `true` by `DeleteAsync`; the record is not physically removed. |
 | ModifiedBy | string | Required, max 100 chars | The username of the person who last created or modified this record. |
 
@@ -538,8 +554,8 @@ The `IFileViewAuditService` and `IOriginalFileDeleteAuditService` are primarily 
 
 This means one or more required configuration values are missing. The exception message tells you exactly which key is missing. Double-check:
 
-1. Your `appsettings.json` contains `TargetedVoyagerInstance`, `TargetedVoyagerEnvironment`, and `ApplicationName`.
-2. The corresponding environment variables (`{instance}.{environment}.{applicationName}.Url`, `.CertificatePath`, `.Password`) are set and non-empty.
+1. Your `appsettings.json` contains `TargetedVoyagerInstance` and `TargetedVoyagerEnvironment`.
+2. The corresponding environment variables (`{instance}.{environment}.Corp.Api.DocMan.Url`, `.CertificatePath`, `.Password`) are set and non-empty.
 
 ### `CS0104: 'File' is an ambiguous reference`
 
@@ -549,14 +565,14 @@ See [File Type Alias](#file-type-alias) above. Add `using File = Corp.Api.DocMan
 
 The client certificate is either missing, expired, or not trusted by the API server. Verify:
 
-1. The `.pfx` file exists at the path specified in `{instance}.{environment}.{applicationName}.CertificatePath`.
+1. The `.pfx` file exists at the path specified in `{instance}.{environment}.Corp.Api.DocMan.CertificatePath`.
 2. The encrypted password can be decrypted successfully.
 3. The certificate is not expired.
 4. The API server trusts the certificate's issuing CA.
 
 ### `ApiException` with `404 Not Found`
 
-Check that the API base URL (`{instance}.{environment}.{applicationName}.Url`) is correct and includes the scheme (`https://`). Also verify the API version — this library targets API version `v1`.
+Check that the API base URL (`{instance}.{environment}.Corp.Api.DocMan.Url`) is correct and includes the scheme (`https://`). Also verify the API version — this library targets API version `v1`.
 
 ## Solution Architecture
 
@@ -585,4 +601,4 @@ The API uses `Asp.Versioning.Mvc` with the default version set to `1.0`. The Ref
 | **Branch** | `Version-10` |
 | **Author** | Mathew Hamilton |
 | **Company** | Sedgwick Consumer Claims |
-| **Package Version** | `10.0.0-beta9` |
+| **Package Version** | `10.1.1` |
