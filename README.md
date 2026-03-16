@@ -10,7 +10,7 @@ Rather than having every consuming application hand-craft HTTP calls, parse JSON
 
 - **Three-interface pattern per service**: Each service area (e.g., File) has three types: a public `IFileService` that consumers inject, a public `IFileRefitService` that defines the raw Refit HTTP contract, and a `FileService` implementation that wraps the Refit client with structured logging and error handling. This separation means consumers can mock `IFileService` in unit tests without needing an HTTP server.
 - **`IApiResponse<T>` return types everywhere**: Rather than returning raw `T` values and throwing exceptions on non-success HTTP responses, every method returns Refit's `IApiResponse<T>`. This gives callers access to the full HTTP response (status code, headers, error body) without requiring try/catch. The library catches `ApiException` internally only for structured logging purposes — it always rethrows so the caller maintains full control.
-- **Mutual-TLS authentication**: All HTTP traffic is secured with client certificate authentication. The certificate path and an AES-encrypted password are resolved from configuration at startup.
+- **Mutual-TLS authentication**: All HTTP traffic is secured with client certificate authentication. The certificate is resolved from configuration at startup — either from a `.pfx` file with an AES-encrypted password, or from the Windows certificate store by thumbprint.
 - **Entity classes bundled in the package**: The `Corp.Api.DocMan.Obj` project is packed into this NuGet as a private asset, so consumers automatically get the entity types (`File`, `Folder`, etc.) without needing a separate package reference.
 
 ## Prerequisites
@@ -19,14 +19,16 @@ Before you can use this library, ensure the following are in place:
 
 - **.NET 10 or later** — The library targets `net10.0`. Your consuming application must use a compatible target framework.
 - **A deployed instance of the Corp.Api.DocMan API** — The library is a client; it requires a running API server to call. Coordinate with your team to get the base URL for your target environment.
-- **A valid client certificate (.pfx) and its AES-encrypted password** — The library authenticates with the API using mutual TLS. You'll need the certificate file deployed to a path accessible by your application and the password encrypted using `Corp.Lib.Cryptography.Aes.Encrypt()`.
+- **A valid client certificate** — The library authenticates with the API using mutual TLS. You can provide authentication credentials in one of two ways:
+  - **File-based**: A `.pfx` certificate file deployed to a path accessible by your application, with the password encrypted using `Corp.Lib.Cryptography.Aes.Encrypt()`.
+  - **Thumbprint-based**: A certificate installed in the Windows certificate store (LocalMachine or CurrentUser), referenced by its SHA-1 thumbprint. The library exports the certificate to a temporary PFX at startup — the private key must be marked as exportable.
 
 ## Installation
 
 Install from your internal NuGet feed:
 
 ```shell
-dotnet add package Corp.Api.DocMan.Lib --version 10.1.1
+dotnet add package Corp.Api.DocMan.Lib --version 10.2.0
 ```
 
 ## Configuration
@@ -58,8 +60,11 @@ Using the two values from Step 1, the library composes configuration keys in the
 | Key | Description |
 |---|---|
 | `{instance}.{environment}.Corp.Api.DocMan.Url` | Base URL of the DocMan API (e.g., `https://docman-api.internal.corp.com`) |
-| `{instance}.{environment}.Corp.Api.DocMan.CertificatePath` | Absolute path to the client certificate `.pfx` file |
-| `{instance}.{environment}.Corp.Api.DocMan.Password` | Certificate password, **AES-encrypted** using `Corp.Lib.Cryptography.Aes.Encrypt()` |
+| `{instance}.{environment}.Corp.Api.DocMan.CertificateThumbprint` | *(Option A)* SHA-1 thumbprint of a certificate installed in the Windows certificate store (LocalMachine or CurrentUser). The private key must be marked as exportable. When this is set, `CertificatePath` and `Password` are not required. |
+| `{instance}.{environment}.Corp.Api.DocMan.CertificatePath` | *(Option B)* Absolute path to the client certificate `.pfx` file. Required when `CertificateThumbprint` is not set. |
+| `{instance}.{environment}.Corp.Api.DocMan.Password` | *(Option B)* Certificate password, **AES-encrypted** using `Corp.Lib.Cryptography.Aes.Encrypt()`. Required when `CertificateThumbprint` is not set. |
+
+> **Note**: You must configure **either** `CertificateThumbprint` (Option A) **or** both `CertificatePath` and `Password` (Option B). If neither option is provided, the library throws a `ConfigurationErrorsException` at startup.
 
 #### Concrete Example
 
@@ -72,7 +77,16 @@ If your `appsettings.json` contains:
 }
 ```
 
-Then the library will look for these three environment variables:
+Then the library will look for the following environment variables. Use **either** Option A (thumbprint) **or** Option B (file path + password):
+
+**Option A — Certificate Thumbprint:**
+
+```
+Voyager1.Production.Corp.Api.DocMan.Url=https://docman-api.internal.corp.com
+Voyager1.Production.Corp.Api.DocMan.CertificateThumbprint=A1B2C3D4E5F6...
+```
+
+**Option B — Certificate File:**
 
 ```
 Voyager1.Production.Corp.Api.DocMan.Url=https://docman-api.internal.corp.com
@@ -80,7 +94,7 @@ Voyager1.Production.Corp.Api.DocMan.CertificatePath=C:\certs\docman-client.pfx
 Voyager1.Production.Corp.Api.DocMan.Password=<AES-encrypted-password>
 ```
 
-If any of these three values are missing or empty, the library throws a `ConfigurationErrorsException` at startup with a descriptive error message identifying exactly which key is missing.
+If the `.Url` value is missing, or neither certificate option is configured, the library throws a `ConfigurationErrorsException` at startup with a descriptive error message identifying exactly which key is missing.
 
 ## Registration
 
@@ -119,8 +133,8 @@ host.Run();
 ### What `AddDocManApi` Does Behind the Scenes
 
 1. **Reads** `TargetedVoyagerInstance` and `TargetedVoyagerEnvironment` from your `appsettings.json`.
-2. **Validates** that the three required environment-variable keys (`.Url`, `.CertificatePath`, `.Password`) are present and non-empty. If any are missing, it throws `ConfigurationErrorsException` with a clear message — this is intentionally a fail-fast design so you catch misconfiguration during startup, not at runtime.
-3. **Decrypts** the certificate password using `Corp.Lib.Cryptography.Aes.Decrypt()`.
+2. **Validates** that the `.Url` environment-variable key is present and non-empty, and that either `.CertificateThumbprint` or both `.CertificatePath` and `.Password` are configured. If any required key is missing, it throws `ConfigurationErrorsException` with a clear message — this is intentionally a fail-fast design so you catch misconfiguration during startup, not at runtime.
+3. **Resolves the certificate** — either by loading from the Windows certificate store by thumbprint (and exporting to a temporary PFX) or by reading the file path and decrypting the password using `Corp.Lib.Cryptography.Aes.Decrypt()`.
 4. **Registers** five Refit HTTP clients into the DI container, each configured with the base URL and mutual-TLS certificate:
    - `IFileService` / `FileService`
    - `IFolderService` / `FolderService`
@@ -154,6 +168,7 @@ public interface IFileService
     Task<IApiResponse<List<File>>> GetByFolderIdAsync(Guid folderId);
     Task<IApiResponse<File>> GetByNameAndFhClaimNumberAsync(string name, string fhClaimNumber);
     Task<IApiResponse<string>> GetVirtualPathAsync(Guid fileId);
+    Task<IApiResponse<DateTime?>> GetCreateDateByIdAsync(Guid id);
     Task<IApiResponse<Guid>> InsertAsync(File file);
     Task<IApiResponse<int>> InsertBatchAsync(List<File> files);
     Task<IApiResponse<int>> UpdateAsync(File file);
@@ -169,6 +184,7 @@ public interface IFileService
 | `GetByFolderIdAsync` | Retrieves all non-deleted files within a specific folder. Returns a list of files whose `FolderId` matches the provided identifier. |
 | `GetByNameAndFhClaimNumberAsync` | Retrieves a single non-deleted file by its `Name` and `FhClaimNumber` combination. Useful for checking whether a specific file already exists for a given claim. |
 | `GetVirtualPathAsync` | Returns the full virtual path of a file including its folder hierarchy and filename with extension (e.g., `ClaimFolder/Subfolder/report.pdf`). The path is built by walking the folder tree from the file's folder up to the root. Returns `null` if the file does not exist or is soft-deleted. |
+| `GetCreateDateByIdAsync` | Returns the creation date of a file by its unique identifier. Returns `null` if the file does not exist. |
 | `InsertAsync` | Creates a new file record. The `Id` may be left as `Guid.Empty` — the API will generate one. Returns the `Guid` of the newly created file. |
 | `InsertBatchAsync` | Creates multiple file records in a single API call. This is significantly more efficient than calling `InsertAsync` in a loop because the API inserts all records in one database round-trip using a table-valued parameter. Returns the number of rows inserted. |
 | `UpdateAsync` | Updates all mutable fields of an existing file (name, type, folder, deleted status). The `Id` field identifies which record to update. |
@@ -245,20 +261,18 @@ public interface IOriginalFileDeleteAuditService
 
 ### IHeartbeatService
 
-Provides health-check endpoints to verify that the DocMan API is running and its database connection is functional. Use this service for monitoring, readiness probes, or diagnostic dashboards.
+Provides a health-check endpoint to verify that the DocMan API is running. Use this service for monitoring, readiness probes, or diagnostic dashboards.
 
 ```csharp
 public interface IHeartbeatService
 {
     Task<IApiResponse<DateTime>> GetHeartbeatAsync();
-    Task<IApiResponse<string>> GetMyRepositoryConnectionStringNameAsync();
 }
 ```
 
 | Method | Description |
 |---|---|
 | `GetHeartbeatAsync` | Returns the API server's current `DateTime`. A successful response confirms the API is reachable and processing requests. |
-| `GetMyRepositoryConnectionStringNameAsync` | Returns the name of the database connection string the API is using. Useful for verifying the API is pointed at the expected database in a given environment. |
 
 ## Usage Examples
 
@@ -471,10 +485,15 @@ Represents a file metadata record in the document store. Each file is associated
 | FhClaimNumber | string | Required, max 15 chars | The claim number this file belongs to. Must follow the `FH` prefix format. |
 | Name | string | Required, max 100 chars | The display name of the file (e.g., `"report.pdf"`). |
 | FileType | string | Required, max 10 chars | The file extension without the dot (e.g., `"pdf"`, `"docx"`). |
+| FileSizeInBytes | long | Required | The size of the file's binary content in bytes. |
 | FolderId | Guid? | FK to Folders, nullable | The folder this file is stored in. `null` means it's at the root level. |
-| KeyVersion | int | Required | The encryption key version used to encrypt the file's binary content. |
+| KeyVersion | int? | Nullable | The encryption key version used to encrypt the file's binary content. `null` if not applicable. |
 | Deleted | bool | Default: false | Soft-delete flag. Set to `true` by `DeleteAsync`; the record is not physically removed. |
 | ModifiedBy | string | Required, max 100 chars | The username of the person who last created or modified this record. |
+| ValidFrom | DateTime | System-managed | Temporal table row start time. Do not set this manually — SQL Server manages it automatically. |
+| ValidTo | DateTime? | System-managed, nullable | Temporal table row end time. Do not set this manually. |
+| ViewedOn | DateTime? | Nullable | The date and time this file was last viewed. Updated by the file view audit process. |
+| ViewedBy | string? | Nullable, max 100 chars | The username of the person who last viewed this file. |
 
 ### Folder
 
@@ -555,7 +574,8 @@ The `IFileViewAuditService` and `IOriginalFileDeleteAuditService` are primarily 
 This means one or more required configuration values are missing. The exception message tells you exactly which key is missing. Double-check:
 
 1. Your `appsettings.json` contains `TargetedVoyagerInstance` and `TargetedVoyagerEnvironment`.
-2. The corresponding environment variables (`{instance}.{environment}.Corp.Api.DocMan.Url`, `.CertificatePath`, `.Password`) are set and non-empty.
+2. The `{instance}.{environment}.Corp.Api.DocMan.Url` environment variable is set and non-empty.
+3. Either `{instance}.{environment}.Corp.Api.DocMan.CertificateThumbprint` is set, or both `{instance}.{environment}.Corp.Api.DocMan.CertificatePath` and `{instance}.{environment}.Corp.Api.DocMan.Password` are set and non-empty.
 
 ### `CS0104: 'File' is an ambiguous reference`
 
@@ -565,8 +585,8 @@ See [File Type Alias](#file-type-alias) above. Add `using File = Corp.Api.DocMan
 
 The client certificate is either missing, expired, or not trusted by the API server. Verify:
 
-1. The `.pfx` file exists at the path specified in `{instance}.{environment}.Corp.Api.DocMan.CertificatePath`.
-2. The encrypted password can be decrypted successfully.
+1. **If using file-based authentication**: The `.pfx` file exists at the path specified in `{instance}.{environment}.Corp.Api.DocMan.CertificatePath`, and the encrypted password can be decrypted successfully.
+2. **If using thumbprint-based authentication**: The certificate with the specified thumbprint is installed in either the LocalMachine or CurrentUser store, and its private key is marked as exportable.
 3. The certificate is not expired.
 4. The API server trusts the certificate's issuing CA.
 
@@ -601,4 +621,4 @@ The API uses `Asp.Versioning.Mvc` with the default version set to `1.0`. The Ref
 | **Branch** | `Version-10` |
 | **Author** | Mathew Hamilton |
 | **Company** | Sedgwick Consumer Claims |
-| **Package Version** | `10.1.1` |
+| **Package Version** | `10.2.0` |
