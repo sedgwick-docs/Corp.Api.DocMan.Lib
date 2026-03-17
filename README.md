@@ -10,7 +10,7 @@ Rather than having every consuming application hand-craft HTTP calls, parse JSON
 
 - **Three-interface pattern per service**: Each service area (e.g., File) has three types: a public `IFileService` that consumers inject, a public `IFileRefitService` that defines the raw Refit HTTP contract, and a `FileService` implementation that wraps the Refit client with structured logging and error handling. This separation means consumers can mock `IFileService` in unit tests without needing an HTTP server.
 - **`IApiResponse<T>` return types everywhere**: Rather than returning raw `T` values and throwing exceptions on non-success HTTP responses, every method returns Refit's `IApiResponse<T>`. This gives callers access to the full HTTP response (status code, headers, error body) without requiring try/catch. The library catches `ApiException` internally only for structured logging purposes — it always rethrows so the caller maintains full control.
-- **Mutual-TLS authentication**: All HTTP traffic is secured with client certificate authentication. The certificate is resolved from configuration at startup — either from a `.pfx` file with an AES-encrypted password, or from the Windows certificate store by thumbprint.
+- **Mutual-TLS authentication**: All HTTP traffic is secured with client certificate authentication. The certificate is resolved from configuration at startup — either from a `.pfx` file with an AES-encrypted password, or by thumbprint which is passed directly to `Corp.Lib.Refit` for certificate store resolution.
 - **Entity classes bundled in the package**: The `Corp.Api.DocMan.Obj` project is packed into this NuGet as a private asset, so consumers automatically get the entity types (`File`, `Folder`, etc.) without needing a separate package reference.
 
 ## Prerequisites
@@ -21,7 +21,7 @@ Before you can use this library, ensure the following are in place:
 - **A deployed instance of the Corp.Api.DocMan API** — The library is a client; it requires a running API server to call. Coordinate with your team to get the base URL for your target environment.
 - **A valid client certificate** — The library authenticates with the API using mutual TLS. You can provide authentication credentials in one of two ways:
   - **File-based**: A `.pfx` certificate file deployed to a path accessible by your application, with the password encrypted using `Corp.Lib.Cryptography.Aes.Encrypt()`.
-  - **Thumbprint-based**: A certificate installed in the Windows certificate store (LocalMachine or CurrentUser), referenced by its SHA-1 thumbprint. The library exports the certificate to a temporary PFX at startup — the private key must be marked as exportable.
+  - **Thumbprint-based**: A certificate installed in the Windows certificate store, referenced by its SHA-1 thumbprint. The thumbprint is passed directly to `Corp.Lib.Refit`, which handles certificate store resolution internally.
 
 ## Installation
 
@@ -60,7 +60,7 @@ Using the two values from Step 1, the library composes configuration keys in the
 | Key | Description |
 |---|---|
 | `{instance}.{environment}.Corp.Api.DocMan.Url` | Base URL of the DocMan API (e.g., `https://docman-api.internal.corp.com`) |
-| `{instance}.{environment}.Corp.Api.DocMan.CertificateThumbprint` | *(Option A)* SHA-1 thumbprint of a certificate installed in the Windows certificate store (LocalMachine or CurrentUser). The private key must be marked as exportable. When this is set, `CertificatePath` and `Password` are not required. |
+| `{instance}.{environment}.Corp.Api.DocMan.CertificateThumbprint` | *(Option A)* SHA-1 thumbprint of a certificate installed in the Windows certificate store. When this is set, `CertificatePath` and `Password` are not required. |
 | `{instance}.{environment}.Corp.Api.DocMan.CertificatePath` | *(Option B)* Absolute path to the client certificate `.pfx` file. Required when `CertificateThumbprint` is not set. |
 | `{instance}.{environment}.Corp.Api.DocMan.Password` | *(Option B)* Certificate password, **AES-encrypted** using `Corp.Lib.Cryptography.Aes.Encrypt()`. Required when `CertificateThumbprint` is not set. |
 
@@ -134,7 +134,7 @@ host.Run();
 
 1. **Reads** `TargetedVoyagerInstance` and `TargetedVoyagerEnvironment` from your `appsettings.json`.
 2. **Validates** that the `.Url` environment-variable key is present and non-empty, and that either `.CertificateThumbprint` or both `.CertificatePath` and `.Password` are configured. If any required key is missing, it throws `ConfigurationErrorsException` with a clear message — this is intentionally a fail-fast design so you catch misconfiguration during startup, not at runtime.
-3. **Resolves the certificate** — either by loading from the Windows certificate store by thumbprint (and exporting to a temporary PFX) or by reading the file path and decrypting the password using `Corp.Lib.Cryptography.Aes.Decrypt()`.
+3. **Resolves the certificate** — either by passing the thumbprint directly to `Corp.Lib.Refit` for certificate store resolution, or by reading the file path and decrypting the password using `Corp.Lib.Cryptography.Aes.Decrypt()`.
 4. **Registers** five Refit HTTP clients into the DI container, each configured with the base URL and mutual-TLS certificate:
    - `IFileService` / `FileService`
    - `IFolderService` / `FolderService`
