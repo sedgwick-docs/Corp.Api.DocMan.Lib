@@ -9,9 +9,24 @@ Rather than having every consuming application hand-craft HTTP calls, parse JSON
 ### Design Decisions
 
 - **Three-interface pattern per service**: Each service area (e.g., File) has three types: a public `IFileService` that consumers inject, a public `IFileRefitService` that defines the raw Refit HTTP contract, and a `FileService` implementation that wraps the Refit client with structured logging and error handling. This separation means consumers can mock `IFileService` in unit tests without needing an HTTP server.
-- **`IApiResponse<T>` return types everywhere**: Rather than returning raw `T` values and throwing exceptions on non-success HTTP responses, every method returns Refit's `IApiResponse<T>`. This gives callers access to the full HTTP response (status code, headers, error body) without requiring try/catch. The library catches `ApiException` internally only for structured logging purposes — it always rethrows so the caller maintains full control.
+- **`IApiResponse<T>` return types everywhere**: Rather than returning raw `T` values, every method returns Refit's `IApiResponse<T>`. This gives callers access to the full HTTP response (status code, headers, error body). For many failure scenarios Refit surfaces HTTP errors through `IsSuccessStatusCode` and `Error` without throwing. The wrapper services additionally catch `ApiException` when it *is* thrown (for example network or deserialization failures), log at Error level, and rethrow so the caller still sees the exception path when it occurs.
 - **Mutual-TLS authentication**: All HTTP traffic is secured with client certificate authentication. The certificate is resolved from configuration at startup — either from a `.pfx` file with an AES-encrypted password, or by thumbprint which is passed directly to `Corp.Lib.Refit` for certificate store resolution.
 - **Entity classes bundled in the package**: The `Corp.Api.DocMan.Obj` project is packed into this NuGet as a private asset, so consumers automatically get the entity types (`File`, `Folder`, etc.) without needing a separate package reference.
+
+### Package contents and dependencies
+
+| Item | Role |
+|---|---|
+| **Corp.Lib.Refit** | Registers typed Refit clients with mutual TLS (thumbprint or PFX path). |
+| **Corp.Lib.Cryptography** | Decrypts the AES-encrypted certificate password when using file-based auth. |
+| **Corp.Api.DocMan.Obj** (project reference, packed) | Shared entity types in `Corp.Api.DocMan.Obj.Entities` with `[Column]` mappings. The Obj project references `Microsoft.AspNetCore.App` as a framework reference. |
+
+**Project layout (this library):**
+
+- `Extensions/ServiceCollectionExtensions.cs` — `AddDocManApi` registration.
+- `Services/*.cs` — wrapper implementations (`FileService`, `FolderService`, …).
+- `Services/Interfaces/*Service.cs` — public consumer-facing contracts.
+- `Services/Interfaces/*RefitService.cs` — Refit HTTP route contracts (relative to the configured base URL).
 
 ## Prerequisites
 
@@ -28,7 +43,7 @@ Before you can use this library, ensure the following are in place:
 Install from your internal NuGet feed:
 
 ```shell
-dotnet add package Corp.Api.DocMan.Lib --version 10.2.0
+dotnet add package Corp.Api.DocMan.Lib --version 10.2.2
 ```
 
 ## Configuration
@@ -141,6 +156,8 @@ host.Run();
    - `IFileViewAuditService` / `FileViewAuditService`
    - `IOriginalFileDeleteAuditService` / `OriginalFileDeleteAuditService`
    - `IHeartbeatService` / `HeartbeatService`
+
+Each client is registered with a logical name passed to `Corp.Lib.Refit` in the form `{prefix}.{Area}`, where `{prefix}` is `{instance}.{environment}.Corp.Api.DocMan` and `{Area}` is one of `Heartbeat`, `File`, `Folder`, `FileViewAudit`, or `OriginalFileDeleteAudit`. You normally inject only the public service interfaces; these names matter if you customize HTTP handlers or diagnostics around the underlying `HttpClient` factory.
 
 After registration, inject any of the service interfaces into your classes via constructor injection:
 
@@ -261,7 +278,7 @@ public interface IOriginalFileDeleteAuditService
 
 ### IHeartbeatService
 
-Provides a health-check endpoint to verify that the DocMan API is running. Use this service for monitoring, readiness probes, or diagnostic dashboards.
+Provides a health-check endpoint to verify that the DocMan API is running. Use this service for monitoring, readiness probes, or diagnostic dashboards. The underlying Refit route is `GET /Heartbeat/GetAsync` (controller action `GetAsync` on `HeartbeatController`); the client interface exposes this as `GetHeartbeatAsync` for clarity.
 
 ```csharp
 public interface IHeartbeatService
@@ -294,7 +311,7 @@ public class DocumentService(IFileService fileService)
             // FhClaimNumber is required and ties this file to a claim.
             FhClaimNumber = "FH1234567890123",
             Name = "report",
-            FileType = ".pdf",
+            FileType = "pdf",
             // ModifiedBy should be the authenticated user performing the action.
             ModifiedBy = "jdoe"
             // Id can be omitted — the API generates a new Guid.
@@ -326,9 +343,9 @@ public async Task<int> UploadMultipleFilesAsync(IFileService fileService)
 {
     var files = new List<Corp.Api.DocMan.Obj.Entities.File>
     {
-        new() { FhClaimNumber = "FH1234567890123", Name = "doc1", FileType = ".pdf", ModifiedBy = "jdoe" },
-        new() { FhClaimNumber = "FH1234567890123", Name = "doc2", FileType = ".pdf", ModifiedBy = "jdoe" },
-        new() { FhClaimNumber = "FH1234567890123", Name = "doc3", FileType = ".pdf", ModifiedBy = "jdoe" }
+        new() { FhClaimNumber = "FH1234567890123", Name = "doc1", FileType = "pdf", ModifiedBy = "jdoe" },
+        new() { FhClaimNumber = "FH1234567890123", Name = "doc2", FileType = "pdf", ModifiedBy = "jdoe" },
+        new() { FhClaimNumber = "FH1234567890123", Name = "doc3", FileType = "pdf", ModifiedBy = "jdoe" }
     };
 
     var response = await fileService.InsertBatchAsync(files);
@@ -439,7 +456,7 @@ All service methods return Refit's `IApiResponse<T>` rather than raw values. Thi
 | `Content` | `T` | The deserialized response body. This is `default(T)` when the request fails, so always check `IsSuccessStatusCode` first. |
 | `IsSuccessStatusCode` | `bool` | `true` if the HTTP status code is in the 2xx range. |
 | `StatusCode` | `HttpStatusCode` | The raw HTTP status code (200, 400, 404, 500, etc.). |
-| `Error` | `ApiException?` | Contains the exception details when the request fails, including the response body from the server. This is `null` on success. |
+| `Error` | `ApiException?` | Contains the exception details when the request fails, including the response body from the server as a serialized [ProblemDetails](https://datatracker.ietf.org/doc/html/rfc7807) JSON object in `Error.Content`. This is `null` on success. |
 | `Headers` | `HttpResponseHeaders` | The HTTP response headers. Useful for correlation IDs or rate-limit information. |
 
 ### Recommended Pattern
@@ -461,7 +478,8 @@ else if (response.StatusCode == System.Net.HttpStatusCode.NotFound)
 else
 {
     // Unexpected failure.
-    // response.Error?.Content contains the raw error body from the API.
+    // response.Error?.Content contains the ProblemDetails JSON body from the API
+    // with "title" and "detail" fields describing the error.
     throw new InvalidOperationException(
         $"DocMan API returned {response.StatusCode}: {response.Error?.Content}");
 }
@@ -469,11 +487,13 @@ else
 
 ### Error Logging
 
-The service implementations already log all `ApiException` errors at `Error` level using `Corp.Lib.Logging` before rethrowing. This means the error will appear in your structured logs with the HTTP status code even if your calling code doesn't explicitly log it. You do **not** need to add your own logging in the catch block unless you want to add application-specific context.
+The service implementations log `ApiException` at `Error` level using `Corp.Lib.Logging` before rethrowing, including HTTP status code and response body where `ApiException.Content` is populated. Many HTTP failures are returned as unsuccessful `IApiResponse<T>` without throwing; for those, rely on `IsSuccessStatusCode`, `StatusCode`, and `Error` in your calling code (and log there if you need application context). When an exception *is* thrown from the Refit stack, the wrapper ensures it is logged once at Error level before propagating.
 
 ## Entity Reference
 
-All entity classes live in the `Corp.Api.DocMan.Obj.Entities` namespace. They are bundled into the NuGet package automatically, so you do not need a separate package reference for them. The `[Column]` attributes on each property map to the corresponding SQL Server column names.
+All entity classes live in the `Corp.Api.DocMan.Obj.Entities` namespace. They are bundled into the NuGet package automatically, so you do not need a separate package reference for them. Properties use `[Column]` from `System.ComponentModel.DataAnnotations.Schema` to map to SQL Server column names. Validation rules described below reflect how the API uses these models; refer to the API implementation for authoritative constraints.
+
+The Obj assembly may also contain other types (for example template entities used by the data layer). The Refit contracts in **this** library use only `File`, `Folder`, `FileViewAudit`, and `OriginalFileDeleteAudit` for DocMan API calls.
 
 ### File
 
@@ -574,8 +594,9 @@ The `IFileViewAuditService` and `IOriginalFileDeleteAuditService` are primarily 
 This means one or more required configuration values are missing. The exception message tells you exactly which key is missing. Double-check:
 
 1. Your `appsettings.json` contains `TargetedVoyagerInstance` and `TargetedVoyagerEnvironment`.
-2. The `{instance}.{environment}.Corp.Api.DocMan.Url` environment variable is set and non-empty.
-3. Either `{instance}.{environment}.Corp.Api.DocMan.CertificateThumbprint` is set, or both `{instance}.{environment}.Corp.Api.DocMan.CertificatePath` and `{instance}.{environment}.Corp.Api.DocMan.Password` are set and non-empty.
+2. A file named `appsettings.json` exists in the process **current working directory** — `AddDocManApi` reads those two keys by opening that file from disk (not via `IConfiguration`).
+3. The `{instance}.{environment}.Corp.Api.DocMan.Url` configuration value is set and non-empty (typically via environment variable).
+4. Either `{instance}.{environment}.Corp.Api.DocMan.CertificateThumbprint` is set, or both `{instance}.{environment}.Corp.Api.DocMan.CertificatePath` and `{instance}.{environment}.Corp.Api.DocMan.Password` are set and non-empty.
 
 ### `CS0104: 'File' is an ambiguous reference`
 
@@ -602,8 +623,12 @@ The DocMan solution is split into four projects, each with a distinct responsibi
 |---|---|---|
 | **Corp.Api.DocMan** | ASP.NET Core Web API | The HTTP API itself. Contains versioned controllers (`FileController`, `FolderController`, etc.) that receive requests and delegate to repositories. This project is deployed as the running service. |
 | **Corp.Api.DocMan.Data** | Class Library | Data access layer. Contains Dapper-based repository classes that execute stored procedures against SQL Server. Each repository maps to a set of related stored procedures. |
-| **Corp.Api.DocMan.Obj** | Class Library | Shared entity classes (`File`, `Folder`, `FileViewAudit`, `OriginalFileDeleteAudit`). These are used by both the API (server-side) and this client library (consumer-side). The `.csproj` references `Microsoft.AspNetCore.App` for model validation attributes. |
+| **Corp.Api.DocMan.Obj** | Class Library | Shared entity classes (`File`, `Folder`, `FileViewAudit`, `OriginalFileDeleteAudit`). These are used by both the API (server-side) and this client library (consumer-side). The `.csproj` uses a `FrameworkReference` to `Microsoft.AspNetCore.App` (shared with the web stack; entities use `[Column]` from `System.ComponentModel.DataAnnotations.Schema`). |
 | **Corp.Api.DocMan.Lib** | Class Library (NuGet) | **This library.** Contains Refit service interfaces, service implementations with logging, and the DI registration extension method. Published as a NuGet package. |
+
+### Running the API from Visual Studio Code
+
+The repository includes `.vscode/launch.json` at the solution root. Choose **Launch Corp.Api.DocMan (web)** in Run and Debug. That configuration sets `cwd` to `DocMan/Corp.Api.DocMan`, points `program` at `DocMan/Corp.Api.DocMan/bin/Debug/net10.0/win-x64/Corp.Api.DocMan.dll` (adjust the RID folder if you build for another runtime), uses the **Corp.Api.DocMan** profile in `DocMan/Corp.Api.DocMan/Properties/launchSettings.json`, and sets `ASPNETCORE_URLS` so Kestrel binds to the same HTTPS URL as `applicationUrl` in that profile (some `coreclr` debuggers do not apply `applicationUrl` from launch settings). It runs the **build** task, then starts the API under the debugger.
 
 ### How the NuGet Package Is Built
 
@@ -618,7 +643,7 @@ The API uses `Asp.Versioning.Mvc` with the default version set to `1.0`. The Ref
 | | |
 |---|---|
 | **Azure DevOps** | https://dev.azure.com/IT-Specialty/Projects/_git/Corp.Solution.Api.DocMan |
-| **Branch** | `Version-10` |
+| **Branch** | Use the branch your team integrates from (for example `uat` or `Version-10`). |
 | **Author** | Mathew Hamilton |
 | **Company** | Sedgwick Consumer Claims |
-| **Package Version** | `10.2.0` |
+| **Package Version** | `10.2.2` (see `<Version>` in `Corp.Api.DocMan.Lib.csproj`) |
